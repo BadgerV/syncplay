@@ -186,6 +186,7 @@ fn sender_ui(ui: &mut egui::Ui, app: &mut AppState, shared: &SharedApp) {
                 shared.clone(),
                 AudioSource::Device(input),
                 DEFAULT_PLAYOUT_DELAY_MS,
+                None,
             ));
         }
         SenderAction::Stop => stop_sender(app),

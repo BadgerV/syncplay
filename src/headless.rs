@@ -20,10 +20,11 @@ pub fn run_sender(
     shared: SharedApp,
     source: AudioSource,
     playout_delay_ms: u64,
+    monitor_output: Option<String>,
     duration_secs: Option<u64>,
 ) -> Result<()> {
     shared.lock().sender.is_streaming = true;
-    let threads = start_sender(shared.clone(), source, playout_delay_ms);
+    let threads = start_sender(shared.clone(), source, playout_delay_ms, monitor_output);
     tracing::info!("Headless sender running (Ctrl-C to stop).");
 
     let deadline = duration_secs.map(|s| Instant::now() + Duration::from_secs(s));

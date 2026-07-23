@@ -138,6 +138,7 @@ fn main() -> Result<()> {
                     app_state.clone(),
                     source,
                     args.playout_delay_ms,
+                    args.output_device.clone(),
                     args.duration,
                 )
             }

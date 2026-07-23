@@ -47,12 +47,21 @@ pub fn start_sender(
     shared: SharedApp,
     source: AudioSource,
     playout_delay_ms: u64,
+    monitor_output: Option<String>,
 ) -> SenderThreads {
     let stop = Arc::new(AtomicBool::new(false));
     let stop_thread = stop.clone();
     let handle = std::thread::Builder::new()
         .name("syncplay-sender".into())
-        .spawn(move || sender_engine(shared, source, playout_delay_ms, stop_thread))
+        .spawn(move || {
+            sender_engine(
+                shared,
+                source,
+                playout_delay_ms,
+                monitor_output,
+                stop_thread,
+            )
+        })
         .expect("failed to spawn sender engine thread");
 
     SenderThreads {
@@ -65,6 +74,7 @@ fn sender_engine(
     shared: SharedApp,
     source: AudioSource,
     playout_delay_ms: u64,
+    monitor_output: Option<String>,
     stop: Arc<AtomicBool>,
 ) {
     let session = match SenderSession::new() {
@@ -130,6 +140,7 @@ fn sender_engine(
     let mut _monitor_sync: Option<std::thread::JoinHandle<()>> = None;
     let monitor = build_sender_monitor(
         budget_us,
+        monitor_output,
         stop.clone(),
         shared.clone(),
         &mut _monitor_stream,
@@ -201,12 +212,21 @@ fn fail_sender(shared: &SharedApp, msg: &str) {
 /// and must be kept alive for the session.
 fn build_sender_monitor(
     budget_us: u64,
+    output_name: Option<String>,
     stop: Arc<AtomicBool>,
     shared: SharedApp,
     stream_slot: &mut Option<cpal::Stream>,
     sync_slot: &mut Option<std::thread::JoinHandle<()>>,
 ) -> Option<SenderMonitor> {
-    let device = device::default_output_device()?;
+    // Pick an explicit output when named (e.g. the built-in speakers) so the
+    // monitor never plays back into a capture loopback like BlackHole. Falls
+    // back to the system default.
+    let device = match output_name {
+        Some(name) if !name.is_empty() => {
+            device::find_output_device(&name).or_else(device::default_output_device)?
+        }
+        _ => device::default_output_device()?,
+    };
     let config = match device::output_config(&device) {
         Ok(c) => c,
         Err(e) => {
