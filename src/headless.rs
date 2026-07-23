@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use crate::engine::{start_receiver, start_sender, AudioSource};
 use crate::error::{Result, SyncPlayError};
-use crate::state::shared::{DiscoveredSender, SharedApp};
+use crate::state::shared::{DiscoveredSender, SharedApp, AUDIO_PORT, CHANNELS, SAMPLE_RATE};
 
 /// How long a headless receiver waits to discover a sender before giving up.
 const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(30);
@@ -50,14 +50,28 @@ pub fn run_sender(shared: SharedApp, source: AudioSource, duration_secs: Option<
 pub fn run_receiver(
     shared: SharedApp,
     connect_filter: Option<String>,
+    manual_ip: Option<String>,
     duration_secs: Option<u64>,
 ) -> Result<()> {
-    tracing::info!("Headless receiver: waiting up to 30s for a sender...");
-    let sender = wait_for_sender(&shared, connect_filter.as_deref(), DISCOVERY_TIMEOUT)
-        .ok_or_else(|| SyncPlayError::Config("no sender discovered within 30s".into()))?;
+    // A manual IP skips mDNS entirely — useful when the network blocks
+    // multicast/Bonjour but unicast between the two Macs still works.
+    let sender = if let Some(ip) = manual_ip {
+        tracing::info!("Manual connect to {ip}:{AUDIO_PORT} (skipping discovery)");
+        DiscoveredSender {
+            name: format!("manual@{ip}"),
+            host: ip,
+            port: AUDIO_PORT,
+            sample_rate: SAMPLE_RATE,
+            channels: CHANNELS,
+        }
+    } else {
+        tracing::info!("Headless receiver: waiting up to 30s for a sender...");
+        wait_for_sender(&shared, connect_filter.as_deref(), DISCOVERY_TIMEOUT)
+            .ok_or_else(|| SyncPlayError::Config("no sender discovered within 30s".into()))?
+    };
 
     tracing::info!(
-        "Discovered '{}' at {}:{} — connecting",
+        "Connecting to '{}' at {}:{}",
         sender.name,
         sender.host,
         sender.port

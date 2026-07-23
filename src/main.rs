@@ -50,6 +50,11 @@ struct Args {
     #[arg(long)]
     connect: Option<String>,
 
+    /// Receiver: connect directly to this sender IP, skipping mDNS discovery
+    /// (use when the network blocks multicast/Bonjour but unicast works)
+    #[arg(long)]
+    sender_ip: Option<String>,
+
     /// Headless: stop automatically after this many seconds
     #[arg(long)]
     duration: Option<u64>,
@@ -119,9 +124,12 @@ fn main() -> Result<()> {
                 };
                 headless::run_sender(app_state.clone(), source, args.duration)
             }
-            AppMode::Receiver => {
-                headless::run_receiver(app_state.clone(), args.connect.clone(), args.duration)
-            }
+            AppMode::Receiver => headless::run_receiver(
+                app_state.clone(),
+                args.connect.clone(),
+                args.sender_ip.clone(),
+                args.duration,
+            ),
         };
         browser_stop.store(true, Ordering::Relaxed);
         return result;

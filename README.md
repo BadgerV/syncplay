@@ -51,6 +51,7 @@ You can also switch modes live from the top bar. CLI flags:
 | `--tone` | Sender: emit a sine test tone instead of capturing a device |
 | `--tone-freq <hz>` | Sender: test-tone frequency (default 440) |
 | `--connect <substr>` | Receiver: only connect to a sender whose name contains `<substr>` |
+| `--sender-ip <ip>` | Receiver: connect directly to a sender IP, skipping mDNS (for networks that block multicast/Bonjour) |
 | `--duration <secs>` | Headless: stop automatically after N seconds |
 
 Logging verbosity is controlled with `RUST_LOG`, e.g. `RUST_LOG=syncplay=debug`.
