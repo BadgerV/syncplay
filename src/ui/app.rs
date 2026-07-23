@@ -3,7 +3,7 @@ use std::time::Duration;
 use egui::{Color32, RichText};
 
 use crate::audio::device::{enumerate_input_devices, enumerate_output_devices};
-use crate::engine::{start_receiver, start_sender};
+use crate::engine::{start_receiver, start_sender, AudioSource};
 use crate::state::shared::{
     AppMode, AppState, ReceiverState, SharedApp, AUDIO_PORT, SAMPLE_RATE,
 };
@@ -191,7 +191,7 @@ fn sender_ui(ui: &mut egui::Ui, app: &mut AppState, shared: &SharedApp) {
             app.sender.is_streaming = true;
             app.sender.packets_sent = 0;
             app.sender.bytes_sent = 0;
-            app.sender_threads = Some(start_sender(shared.clone(), input));
+            app.sender_threads = Some(start_sender(shared.clone(), AudioSource::Device(input)));
         }
         SenderAction::Stop => stop_sender(app),
         SenderAction::None => {}

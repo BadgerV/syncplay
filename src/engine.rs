@@ -10,11 +10,12 @@
 //! network loop on the same thread. Tearing down is a single `AtomicBool`.
 
 use std::net::UdpSocket;
-use std::sync::atomic::{AtomicBool, AtomicU32};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use cpal::traits::DeviceTrait;
-use crossbeam_channel::bounded;
+use crossbeam_channel::{bounded, Sender};
 
 use crate::audio::capture::start_capture;
 use crate::audio::device;
@@ -28,13 +29,22 @@ use crate::state::shared::{
 };
 use crate::sync::controller::run_sync_controller;
 
+/// Where the sender pulls audio from.
+pub enum AudioSource {
+    /// Capture from an input device (empty string = system default).
+    Device(String),
+    /// Synthesize a sine test tone at the given frequency (Hz). Lets us verify
+    /// end-to-end streaming without a loopback device like BlackHole.
+    Tone(f32),
+}
+
 /// Start the sender pipeline. Returns thread handles the UI stores in state.
-pub fn start_sender(shared: SharedApp, input_name: String) -> SenderThreads {
+pub fn start_sender(shared: SharedApp, source: AudioSource) -> SenderThreads {
     let stop = Arc::new(AtomicBool::new(false));
     let stop_thread = stop.clone();
     let handle = std::thread::Builder::new()
         .name("syncplay-sender".into())
-        .spawn(move || sender_engine(shared, input_name, stop_thread))
+        .spawn(move || sender_engine(shared, source, stop_thread))
         .expect("failed to spawn sender engine thread");
 
     SenderThreads {
@@ -43,23 +53,7 @@ pub fn start_sender(shared: SharedApp, input_name: String) -> SenderThreads {
     }
 }
 
-fn sender_engine(shared: SharedApp, input_name: String, stop: Arc<AtomicBool>) {
-    // Resolve the input device (explicit selection, else system default).
-    let device = if input_name.is_empty() {
-        device::default_input_device()
-    } else {
-        device::find_input_device(&input_name).or_else(device::default_input_device)
-    };
-    let device = match device {
-        Some(d) => d,
-        None => return fail_sender(&shared, "no input device available"),
-    };
-
-    let config = match device::input_config(&device) {
-        Ok(c) => c,
-        Err(e) => return fail_sender(&shared, &format!("input config error: {e}")),
-    };
-
+fn sender_engine(shared: SharedApp, source: AudioSource, stop: Arc<AtomicBool>) {
     let session = match SenderSession::new() {
         Ok(s) => s,
         Err(e) => return fail_sender(&shared, &format!("cannot bind sender ports: {e}")),
@@ -67,11 +61,42 @@ fn sender_engine(shared: SharedApp, input_name: String, stop: Arc<AtomicBool>) {
 
     let (tx, rx) = bounded::<Vec<i16>>(64);
 
-    // Build and keep the capture stream alive for the whole session.
-    let _stream = match start_capture(&device, &config, tx, stop.clone()) {
-        Ok(s) => s,
-        Err(e) => return fail_sender(&shared, &format!("cannot start capture: {e}")),
-    };
+    // Own the audio source for the whole session. Exactly one of these is set;
+    // both bindings stay in scope so the stream/thread lives until we return.
+    let mut _capture: Option<cpal::Stream> = None;
+    let mut _tone: Option<std::thread::JoinHandle<()>> = None;
+
+    match source {
+        AudioSource::Tone(freq) => {
+            tracing::info!("Sender source: {freq:.0} Hz test tone");
+            _tone = Some(spawn_tone(freq as f64, 0.15, tx, stop.clone()));
+        }
+        AudioSource::Device(input_name) => {
+            let device = if input_name.is_empty() {
+                device::default_input_device()
+            } else {
+                device::find_input_device(&input_name).or_else(device::default_input_device)
+            };
+            let device = match device {
+                Some(d) => d,
+                None => return fail_sender(&shared, "no input device available"),
+            };
+            let config = match device::input_config(&device) {
+                Ok(c) => c,
+                Err(e) => return fail_sender(&shared, &format!("input config error: {e}")),
+            };
+            match start_capture(&device, &config, tx, stop.clone()) {
+                Ok(s) => {
+                    tracing::info!(
+                        "Sender source: '{}'",
+                        device.name().unwrap_or_else(|_| "unknown".into())
+                    );
+                    _capture = Some(s);
+                }
+                Err(e) => return fail_sender(&shared, &format!("cannot start capture: {e}")),
+            }
+        }
+    }
 
     // Advertise ourselves so receivers can discover us.
     let discovery = DiscoveryService::new().ok();
@@ -83,12 +108,7 @@ fn sender_engine(shared: SharedApp, input_name: String, stop: Arc<AtomicBool>) {
         }
     }
 
-    tracing::info!(
-        "Sender engine running on '{}'",
-        device.name().unwrap_or_else(|_| "unknown".into())
-    );
-
-    // Blocks until `stop` is set; `_stream` stays alive in scope meanwhile.
+    // Blocks until `stop` is set; the source above stays alive in scope.
     session.run(rx, shared.clone(), stop.clone());
 
     if let Some(d) = &discovery {
@@ -96,6 +116,49 @@ fn sender_engine(shared: SharedApp, input_name: String, stop: Arc<AtomicBool>) {
     }
     shared.lock().sender.is_streaming = false;
     tracing::info!("Sender engine stopped");
+}
+
+/// Spawn a thread that emits an interleaved-stereo sine test tone into the
+/// packet channel, paced in real time at 480-frame (10 ms) chunks.
+fn spawn_tone(
+    freq: f64,
+    amplitude: f32,
+    tx: Sender<Vec<i16>>,
+    stop: Arc<AtomicBool>,
+) -> std::thread::JoinHandle<()> {
+    std::thread::Builder::new()
+        .name("syncplay-tone".into())
+        .spawn(move || {
+            const FRAMES: usize = 480;
+            let step = std::f64::consts::TAU * freq / SAMPLE_RATE as f64;
+            let chunk = Duration::from_micros(FRAMES as u64 * 1_000_000 / SAMPLE_RATE as u64);
+            let mut phase = 0.0f64;
+            let mut next = Instant::now();
+
+            while !stop.load(Ordering::Relaxed) {
+                let mut buf = Vec::with_capacity(FRAMES * 2);
+                for _ in 0..FRAMES {
+                    let s = (phase.sin() as f32 * amplitude * 32767.0) as i16;
+                    buf.push(s); // L
+                    buf.push(s); // R
+                    phase += step;
+                    if phase >= std::f64::consts::TAU {
+                        phase -= std::f64::consts::TAU;
+                    }
+                }
+                let _ = tx.try_send(buf);
+
+                // Pace to real time so we don't flood the channel.
+                next += chunk;
+                let now = Instant::now();
+                if next > now {
+                    std::thread::sleep(next - now);
+                } else {
+                    next = now;
+                }
+            }
+        })
+        .expect("failed to spawn tone thread")
 }
 
 fn fail_sender(shared: &SharedApp, msg: &str) {

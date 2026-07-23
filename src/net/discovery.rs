@@ -23,10 +23,16 @@ impl DiscoveryService {
     }
 
     /// Register this machine as a SyncPlay sender.
+    ///
+    /// `ip` is this host's LAN address. mdns-sd requires the *hostname* (A/AAAA
+    /// record name) to end in `.local.` and treats it separately from the IP,
+    /// so we synthesize a valid, IP-derived hostname (e.g. `192-9-200-136.local.`)
+    /// and pass the real IP explicitly — otherwise registration fails and no
+    /// receiver can discover us.
     pub fn register_sender(
         &self,
         name: &str,
-        host: &str,
+        ip: &str,
         port: u16,
         sample_rate: u32,
         channels: u16,
@@ -36,11 +42,13 @@ impl DiscoveryService {
         props.insert("channels".to_string(), channels.to_string());
         props.insert("version".to_string(), "1".to_string());
 
+        let host_name = format!("{}.local.", ip.replace(['.', ':'], "-"));
+
         let service_info = ServiceInfo::new(
             MDNS_SERVICE_TYPE,
             name,
-            host,
-            "",
+            &host_name,
+            ip,
             port,
             props,
         )
@@ -52,7 +60,7 @@ impl DiscoveryService {
             crate::error::SyncPlayError::Mdns(format!("Failed to register service: {e}"))
         })?;
 
-        tracing::info!("Registered mDNS service: {name} on port {port}");
+        tracing::info!("Registered mDNS service: {name} at {ip}:{port} (host {host_name})");
         Ok(())
     }
 

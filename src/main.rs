@@ -1,6 +1,7 @@
 mod audio;
 mod engine;
 mod error;
+mod headless;
 mod net;
 mod state;
 mod sync;
@@ -32,6 +33,26 @@ struct Args {
     /// Output device name (receiver mode, partial match)
     #[arg(long)]
     output_device: Option<String>,
+
+    /// Run without a GUI (for automated / two-machine testing)
+    #[arg(long)]
+    headless: bool,
+
+    /// Sender: emit a sine test tone instead of capturing a device
+    #[arg(long)]
+    tone: bool,
+
+    /// Sender: test-tone frequency in Hz
+    #[arg(long, default_value_t = 440.0)]
+    tone_freq: f32,
+
+    /// Receiver: only connect to a sender whose name contains this substring
+    #[arg(long)]
+    connect: Option<String>,
+
+    /// Headless: stop automatically after this many seconds
+    #[arg(long)]
+    duration: Option<u64>,
 }
 
 fn main() -> Result<()> {
@@ -85,6 +106,25 @@ fn main() -> Result<()> {
         });
     } else {
         tracing::warn!("mDNS unavailable — sender discovery disabled");
+    }
+
+    // ── Headless mode: run the engine directly, no GUI ──
+    if args.headless {
+        let result = match mode {
+            AppMode::Sender => {
+                let source = if args.tone {
+                    engine::AudioSource::Tone(args.tone_freq)
+                } else {
+                    engine::AudioSource::Device(args.input_device.clone().unwrap_or_default())
+                };
+                headless::run_sender(app_state.clone(), source, args.duration)
+            }
+            AppMode::Receiver => {
+                headless::run_receiver(app_state.clone(), args.connect.clone(), args.duration)
+            }
+        };
+        browser_stop.store(true, Ordering::Relaxed);
+        return result;
     }
 
     // ── Launch GUI ──

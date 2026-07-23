@@ -47,8 +47,29 @@ You can also switch modes live from the top bar. CLI flags:
 | `--sender` | Start in sender mode (default: receiver) |
 | `--input-device <name>` | Preselect a capture device (partial match) |
 | `--output-device <name>` | Preselect an output device (partial match) |
+| `--headless` | Run without a GUI (for automated / two-machine testing) |
+| `--tone` | Sender: emit a sine test tone instead of capturing a device |
+| `--tone-freq <hz>` | Sender: test-tone frequency (default 440) |
+| `--connect <substr>` | Receiver: only connect to a sender whose name contains `<substr>` |
+| `--duration <secs>` | Headless: stop automatically after N seconds |
 
 Logging verbosity is controlled with `RUST_LOG`, e.g. `RUST_LOG=syncplay=debug`.
+
+### Headless smoke test (no GUI, no BlackHole)
+
+Verify the whole streaming path with a built-in sine tone. On one machine:
+
+```bash
+# Terminal 1 — sender emits a 440 Hz tone
+RUST_LOG=syncplay=info ./target/release/syncplay --sender --headless --tone --duration 30
+
+# Terminal 2 — receiver auto-discovers, connects, and plays it
+RUST_LOG=syncplay=info ./target/release/syncplay --headless --duration 25
+```
+
+The receiver logs `received=… lost=… buffer=…ms`; a steady climb with ~0% loss
+means audio is flowing. Across two Macs, run the sender on one and the receiver
+on the other (same LAN) — no flags change.
 
 ## Usage
 
