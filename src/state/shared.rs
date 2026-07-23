@@ -12,6 +12,13 @@ pub const AUDIO_PORT: u16 = 12345;
 pub const CONTROL_PORT: u16 = 12346;
 pub const MDNS_SERVICE_TYPE: &str = "_syncplay._udp.local.";
 
+/// Default synchronized-playout budget: the fixed delay, measured from the
+/// moment audio is captured on the sender, at which *every* endpoint (the
+/// source included) plays it. Must exceed worst-case network + device latency
+/// so the buffer is primed by the time the deadline arrives. ~200 ms is the
+/// same ballpark AirPlay 2 / Snapcast use.
+pub const DEFAULT_PLAYOUT_DELAY_MS: u64 = 200;
+
 // ─── App Mode ──────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -166,7 +173,8 @@ impl JitterBuffer {
         for slot in out.iter_mut().take(available) {
             *slot = buf.pop_front().unwrap_or(0);
         }
-        self.total_read.fetch_add(available as u64, Ordering::Relaxed);
+        self.total_read
+            .fetch_add(available as u64, Ordering::Relaxed);
         available
     }
 
@@ -182,6 +190,72 @@ impl JitterBuffer {
             self.packets_lost
                 .fetch_add(seq - prev - 1, Ordering::Relaxed);
         }
+    }
+}
+
+// ─── Playout Gate ──────────────────────────────────────
+
+/// Holds an audio output silent until a scheduled wall-clock deadline, then
+/// latches open forever. This is the mechanism that makes playback start at the
+/// *same instant* on every endpoint: each side arms the gate with its own
+/// local deadline (`capture_ts − clock_offset + budget`) and the output stays
+/// muted — without draining the jitter buffer — until that moment arrives.
+pub struct PlayoutGate {
+    /// Local-clock microseconds at which to begin playing. 0 = not yet armed.
+    start_deadline_us: AtomicU64,
+    /// Latched once the deadline has passed.
+    started: AtomicBool,
+}
+
+impl PlayoutGate {
+    pub fn new() -> Self {
+        Self {
+            start_deadline_us: AtomicU64::new(0),
+            started: AtomicBool::new(false),
+        }
+    }
+
+    /// Arm the gate with a local-clock deadline. Only the first call takes
+    /// effect (the first audio chunk anchors the whole stream).
+    pub fn arm(&self, deadline_us: u64) {
+        let _ = self.start_deadline_us.compare_exchange(
+            0,
+            deadline_us.max(1),
+            Ordering::AcqRel,
+            Ordering::Relaxed,
+        );
+    }
+
+    pub fn is_armed(&self) -> bool {
+        self.start_deadline_us.load(Ordering::Relaxed) != 0
+    }
+
+    pub fn deadline_us(&self) -> u64 {
+        self.start_deadline_us.load(Ordering::Relaxed)
+    }
+
+    /// Whether the output should be producing audio at `now_us`. Latches true.
+    pub fn should_play(&self, now_us: u64) -> bool {
+        if self.started.load(Ordering::Relaxed) {
+            return true;
+        }
+        let deadline = self.start_deadline_us.load(Ordering::Relaxed);
+        if deadline != 0 && now_us >= deadline {
+            self.started.store(true, Ordering::Relaxed);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn has_started(&self) -> bool {
+        self.started.load(Ordering::Relaxed)
+    }
+}
+
+impl Default for PlayoutGate {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

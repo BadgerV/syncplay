@@ -40,8 +40,8 @@ pub fn start_capture(
             if channels == 1 {
                 for sample in data.iter().take(frames) {
                     let s = (*sample * 32767.0).clamp(-32768.0, 32767.0) as i16;
-                    buffer.push(s);    // L
-                    buffer.push(s);    // R (duplicate mono)
+                    buffer.push(s); // L
+                    buffer.push(s); // R (duplicate mono)
                 }
             } else {
                 // Stereo (or more — use first two channels)

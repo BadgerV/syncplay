@@ -5,7 +5,8 @@ use std::sync::Arc;
 use cpal::traits::{DeviceTrait, StreamTrait};
 use parking_lot::Mutex;
 
-use crate::state::shared::{JitterBuffer, SharedRatio};
+use crate::state::shared::{JitterBuffer, PlayoutGate, SharedRatio};
+use crate::sync::clock::now_us;
 
 /// Start audio playback through the given output device.
 ///
@@ -13,12 +14,17 @@ use crate::state::shared::{JitterBuffer, SharedRatio};
 /// buffer, resamples them by the current sync `ratio` (input frames consumed
 /// per output frame — driven by the sync controller), applies `volume`, and
 /// writes f32 samples to the device.
+///
+/// The `gate` holds the output silent — *without* draining the jitter buffer —
+/// until its scheduled start instant, so playback begins at the same moment on
+/// every endpoint.
 pub fn start_playback(
     device: &cpal::Device,
     config: &cpal::StreamConfig,
     jitter: Arc<JitterBuffer>,
     ratio: Arc<SharedRatio>,
     volume: Arc<AtomicU32>,
+    gate: Arc<PlayoutGate>,
     stop: Arc<AtomicBool>,
 ) -> Result<cpal::Stream, crate::error::SyncPlayError> {
     let channels = config.channels as usize;
@@ -28,6 +34,13 @@ pub fn start_playback(
         config,
         move |output: &mut [f32], _info: &cpal::OutputCallbackInfo| {
             if stop.load(Ordering::Relaxed) {
+                output.fill(0.0);
+                return;
+            }
+
+            // Hold silent until the shared playout deadline. Crucially we do NOT
+            // touch the jitter buffer here, so it primes while we wait.
+            if !gate.should_play(now_us()) {
                 output.fill(0.0);
                 return;
             }

@@ -44,15 +44,8 @@ impl DiscoveryService {
 
         let host_name = format!("{}.local.", ip.replace(['.', ':'], "-"));
 
-        let service_info = ServiceInfo::new(
-            MDNS_SERVICE_TYPE,
-            name,
-            &host_name,
-            ip,
-            port,
-            props,
-        )
-        .map_err(|e| {
+        let service_info = ServiceInfo::new(MDNS_SERVICE_TYPE, name, &host_name, ip, port, props)
+            .map_err(|e| {
             crate::error::SyncPlayError::Mdns(format!("Failed to create service info: {e}"))
         })?;
 
@@ -74,20 +67,16 @@ impl DiscoveryService {
     /// Shutdown the mDNS daemon.
     #[allow(dead_code)]
     pub fn shutdown(&self) -> Result<()> {
-        self.daemon.shutdown().map_err(|e| {
-            crate::error::SyncPlayError::Mdns(format!("mDNS shutdown error: {e}"))
-        })?;
+        self.daemon
+            .shutdown()
+            .map_err(|e| crate::error::SyncPlayError::Mdns(format!("mDNS shutdown error: {e}")))?;
         Ok(())
     }
 }
 
 /// Run the mDNS browser in a background thread.
 /// Continuously polls for new/disappeared senders and updates the app state.
-pub fn run_discovery_browser(
-    daemon: ServiceDaemon,
-    app: SharedApp,
-    stop: Arc<AtomicBool>,
-) {
+pub fn run_discovery_browser(daemon: ServiceDaemon, app: SharedApp, stop: Arc<AtomicBool>) {
     let receiver = match daemon.browse(MDNS_SERVICE_TYPE) {
         Ok(rx) => rx,
         Err(e) => {
@@ -101,7 +90,9 @@ pub fn run_discovery_browser(
     while !stop.load(Ordering::Relaxed) {
         match receiver.recv_timeout(Duration::from_millis(500)) {
             Ok(ServiceEvent::ServiceResolved(info)) => {
-                let host = info.get_addresses().iter()
+                let host = info
+                    .get_addresses()
+                    .iter()
                     .next()
                     .map(|a| a.to_string())
                     .unwrap_or_else(|| info.get_hostname().to_string());
@@ -129,19 +120,26 @@ pub fn run_discovery_browser(
                 let mut app = app.lock();
                 // Avoid duplicates
                 let key = (sender.host.clone(), sender.port);
-                let exists = app.receiver.discovered_senders.iter().any(|s| {
-                    (s.host.clone(), s.port) == key
-                });
+                let exists = app
+                    .receiver
+                    .discovered_senders
+                    .iter()
+                    .any(|s| (s.host.clone(), s.port) == key);
                 if !exists {
-                    tracing::info!("Discovered sender: {} ({}:{})", sender.name, sender.host, sender.port);
+                    tracing::info!(
+                        "Discovered sender: {} ({}:{})",
+                        sender.name,
+                        sender.host,
+                        sender.port
+                    );
                     app.receiver.discovered_senders.push(sender);
                 }
             }
             Ok(ServiceEvent::ServiceRemoved(instance_name, _)) => {
                 let mut app = app.lock();
-                app.receiver.discovered_senders.retain(|s| {
-                    !instance_name.contains(&s.name)
-                });
+                app.receiver
+                    .discovered_senders
+                    .retain(|s| !instance_name.contains(&s.name));
                 tracing::info!("Sender removed: {instance_name}");
             }
             Ok(_) => {}

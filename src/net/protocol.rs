@@ -23,12 +23,16 @@ pub enum ControlMessage {
     /// Receiver → Sender: request to unsubscribe
     Unsubscribe,
     /// Sender → Receiver: acknowledge subscription with stream info
-    Welcome {
-        sample_rate: u32,
-        channels: u16,
-    },
+    Welcome { sample_rate: u32, channels: u16 },
     /// Sender → Receiver: stream is ending
     Goodbye,
+    /// Receiver → Sender: clock-sync probe. `client_send_us` is the receiver's
+    /// local time when it sent this; echoed back so the receiver can match the
+    /// reply and compute round-trip time.
+    TimeSyncRequest { client_send_us: u64 },
+    /// Sender → Receiver: reply to a probe. `server_us` is the sender's clock
+    /// (same timescale as `AudioPacket::timestamp_micros`) at receipt.
+    TimeSyncResponse { client_send_us: u64, server_us: u64 },
 }
 
 /// Maximum UDP packet size (generous buffer for ~2KB audio + headers)

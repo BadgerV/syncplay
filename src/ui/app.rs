@@ -5,7 +5,7 @@ use egui::{Color32, RichText};
 use crate::audio::device::{enumerate_input_devices, enumerate_output_devices};
 use crate::engine::{start_receiver, start_sender, AudioSource};
 use crate::state::shared::{
-    AppMode, AppState, ReceiverState, SharedApp, AUDIO_PORT, SAMPLE_RATE,
+    AppMode, AppState, ReceiverState, SharedApp, AUDIO_PORT, DEFAULT_PLAYOUT_DELAY_MS, SAMPLE_RATE,
 };
 
 /// The main egui application.
@@ -43,43 +43,38 @@ impl eframe::App for SyncPlayApp {
         });
 
         // ── Central area ──
-        egui::CentralPanel::default().show(ctx, |ui| {
-            match app.mode {
-                AppMode::Sender => sender_ui(ui, &mut app, &shared),
-                AppMode::Receiver => receiver_ui(ui, &mut app, &shared),
-            }
+        egui::CentralPanel::default().show(ctx, |ui| match app.mode {
+            AppMode::Sender => sender_ui(ui, &mut app, &shared),
+            AppMode::Receiver => receiver_ui(ui, &mut app, &shared),
         });
 
         // ── Bottom status bar ──
         egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                match app.mode {
-                    AppMode::Sender => {
-                        if app.sender.is_streaming {
-                            ui.label(RichText::new("● Streaming").color(Color32::GREEN));
-                            ui.separator();
-                            ui.label(format!(
-                                "Packets: {} | Receivers: {}",
-                                app.sender.packets_sent,
-                                app.sender.receiver_count,
-                            ));
-                        } else {
-                            ui.label(RichText::new("○ Idle").color(Color32::GRAY));
-                        }
+            ui.horizontal(|ui| match app.mode {
+                AppMode::Sender => {
+                    if app.sender.is_streaming {
+                        ui.label(RichText::new("● Streaming").color(Color32::GREEN));
+                        ui.separator();
+                        ui.label(format!(
+                            "Packets: {} | Receivers: {}",
+                            app.sender.packets_sent, app.sender.receiver_count,
+                        ));
+                    } else {
+                        ui.label(RichText::new("○ Idle").color(Color32::GRAY));
                     }
-                    AppMode::Receiver => {
-                        if app.receiver.is_connected {
-                            ui.label(RichText::new("● Connected").color(Color32::GREEN));
-                            ui.separator();
-                            ui.label(format!(
-                                "Buf: {:.0}ms | Speed: {:+.3}% | Loss: {:.1}%",
-                                app.receiver.buffer_fill_ms,
-                                app.receiver.current_speed_adjust * 100.0,
-                                loss_percent(&app.receiver),
-                            ));
-                        } else {
-                            ui.label(RichText::new("○ Idle").color(Color32::GRAY));
-                        }
+                }
+                AppMode::Receiver => {
+                    if app.receiver.is_connected {
+                        ui.label(RichText::new("● Connected").color(Color32::GREEN));
+                        ui.separator();
+                        ui.label(format!(
+                            "Buf: {:.0}ms | Speed: {:+.3}% | Loss: {:.1}%",
+                            app.receiver.buffer_fill_ms,
+                            app.receiver.current_speed_adjust * 100.0,
+                            loss_percent(&app.receiver),
+                        ));
+                    } else {
+                        ui.label(RichText::new("○ Idle").color(Color32::GRAY));
                     }
                 }
             });
@@ -120,11 +115,7 @@ fn sender_ui(ui: &mut egui::Ui, app: &mut AppState, shared: &SharedApp) {
             })
             .show_ui(ui, |ui| {
                 for dev in &s.available_input_devices {
-                    ui.selectable_value(
-                        &mut s.selected_input_device,
-                        dev.clone(),
-                        dev,
-                    );
+                    ui.selectable_value(&mut s.selected_input_device, dev.clone(), dev);
                 }
             });
     });
@@ -191,7 +182,11 @@ fn sender_ui(ui: &mut egui::Ui, app: &mut AppState, shared: &SharedApp) {
             app.sender.is_streaming = true;
             app.sender.packets_sent = 0;
             app.sender.bytes_sent = 0;
-            app.sender_threads = Some(start_sender(shared.clone(), AudioSource::Device(input)));
+            app.sender_threads = Some(start_sender(
+                shared.clone(),
+                AudioSource::Device(input),
+                DEFAULT_PLAYOUT_DELAY_MS,
+            ));
         }
         SenderAction::Stop => stop_sender(app),
         SenderAction::None => {}
@@ -236,11 +231,7 @@ fn receiver_ui(ui: &mut egui::Ui, app: &mut AppState, shared: &SharedApp) {
             })
             .show_ui(ui, |ui| {
                 for dev in &r.available_output_devices {
-                    ui.selectable_value(
-                        &mut r.selected_output_device,
-                        dev.clone(),
-                        dev,
-                    );
+                    ui.selectable_value(&mut r.selected_output_device, dev.clone(), dev);
                 }
             });
     });
@@ -254,15 +245,18 @@ fn receiver_ui(ui: &mut egui::Ui, app: &mut AppState, shared: &SharedApp) {
         .show(ui, |ui| {
             if r.discovered_senders.is_empty() {
                 ui.label(
-                    RichText::new("No senders found. Make sure a sender is running on the network.")
-                        .italics()
-                        .color(Color32::GRAY),
+                    RichText::new(
+                        "No senders found. Make sure a sender is running on the network.",
+                    )
+                    .italics()
+                    .color(Color32::GRAY),
                 );
             } else {
                 for sender in r.discovered_senders.clone() {
-                    let is_connected = r.connected_sender.as_ref().is_some_and(|cs| {
-                        cs.host == sender.host && cs.port == sender.port
-                    });
+                    let is_connected = r
+                        .connected_sender
+                        .as_ref()
+                        .is_some_and(|cs| cs.host == sender.host && cs.port == sender.port);
 
                     ui.horizontal(|ui| {
                         let response = ui.selectable_label(
@@ -312,10 +306,7 @@ fn receiver_ui(ui: &mut egui::Ui, app: &mut AppState, shared: &SharedApp) {
                 .text("Buffer Delay (ms)")
                 .step_by(5.0),
         );
-        ui.label(format!(
-            "Current delay: {:.0}ms",
-            r.target_delay_ms
-        ));
+        ui.label(format!("Current delay: {:.0}ms", r.target_delay_ms));
 
         // Volume slider
         ui.add(
@@ -362,7 +353,12 @@ fn receiver_ui(ui: &mut egui::Ui, app: &mut AppState, shared: &SharedApp) {
             app.receiver.packets_received = 0;
             app.receiver.packets_lost = 0;
             app.receiver.underruns = 0;
-            app.receiver_threads = Some(start_receiver(shared.clone(), sender, output));
+            app.receiver_threads = Some(start_receiver(
+                shared.clone(),
+                sender,
+                output,
+                DEFAULT_PLAYOUT_DELAY_MS,
+            ));
         }
         ReceiverAction::Disconnect => stop_receiver(app),
         ReceiverAction::None => {}
@@ -398,16 +394,12 @@ fn peak_meter(ui: &mut egui::Ui, level: f32) {
     let (rect, _) = ui.allocate_exact_size(desired, egui::Sense::hover());
 
     // Background
-    ui.painter()
-        .rect_filled(rect, 3.0, Color32::from_gray(40));
+    ui.painter().rect_filled(rect, 3.0, Color32::from_gray(40));
 
     // Gradient fill
     let fill_width = rect.width() * frac;
     if fill_width > 0.0 {
-        let fill_rect = egui::Rect::from_min_size(
-            rect.min,
-            egui::vec2(fill_width, rect.height()),
-        );
+        let fill_rect = egui::Rect::from_min_size(rect.min, egui::vec2(fill_width, rect.height()));
         let color = if db > -6.0 {
             Color32::RED
         } else if db > -12.0 {
@@ -419,8 +411,12 @@ fn peak_meter(ui: &mut egui::Ui, level: f32) {
     }
 
     // Border
-    ui.painter()
-        .rect_stroke(rect, 3.0, egui::Stroke::new(1.0_f32, Color32::from_gray(100)), egui::StrokeKind::Inside);
+    ui.painter().rect_stroke(
+        rect,
+        3.0,
+        egui::Stroke::new(1.0_f32, Color32::from_gray(100)),
+        egui::StrokeKind::Inside,
+    );
 
     // Text
     let label_rect = egui::Rect::from_min_size(

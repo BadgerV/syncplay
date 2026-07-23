@@ -11,9 +11,7 @@ pub struct DeviceInfo {
 /// Enumerate available input audio devices.
 pub fn enumerate_input_devices() -> Vec<DeviceInfo> {
     let host = cpal::default_host();
-    let default_input = host
-        .default_input_device()
-        .and_then(|d| d.name().ok());
+    let default_input = host.default_input_device().and_then(|d| d.name().ok());
 
     let mut devices: Vec<DeviceInfo> = match host.input_devices() {
         Ok(iter) => iter
@@ -38,9 +36,7 @@ pub fn enumerate_input_devices() -> Vec<DeviceInfo> {
 /// Enumerate available output audio devices.
 pub fn enumerate_output_devices() -> Vec<DeviceInfo> {
     let host = cpal::default_host();
-    let default_output = host
-        .default_output_device()
-        .and_then(|d| d.name().ok());
+    let default_output = host.default_output_device().and_then(|d| d.name().ok());
 
     let mut devices: Vec<DeviceInfo> = match host.output_devices() {
         Ok(iter) => iter
@@ -92,7 +88,9 @@ pub fn default_output_device() -> Option<cpal::Device> {
 }
 
 /// Get a suitable stereo input config for a device at 48kHz.
-pub fn input_config(device: &cpal::Device) -> Result<cpal::StreamConfig, crate::error::SyncPlayError> {
+pub fn input_config(
+    device: &cpal::Device,
+) -> Result<cpal::StreamConfig, crate::error::SyncPlayError> {
     let supported: Vec<_> = device
         .supported_input_configs()
         .map_err(|e| crate::error::SyncPlayError::Audio(format!("Cannot get input configs: {e}")))?
@@ -100,7 +98,8 @@ pub fn input_config(device: &cpal::Device) -> Result<cpal::StreamConfig, crate::
 
     // Try to find stereo 48kHz
     for cfg in &supported {
-        if cfg.channels() == CHANNELS && cfg.min_sample_rate() <= cpal::SampleRate(SAMPLE_RATE)
+        if cfg.channels() == CHANNELS
+            && cfg.min_sample_rate() <= cpal::SampleRate(SAMPLE_RATE)
             && cfg.max_sample_rate() >= cpal::SampleRate(SAMPLE_RATE)
         {
             return Ok(cpal::StreamConfig {
@@ -130,14 +129,17 @@ pub fn input_config(device: &cpal::Device) -> Result<cpal::StreamConfig, crate::
 }
 
 /// Get a suitable stereo output config for a device at 48kHz.
-pub fn output_config(device: &cpal::Device) -> Result<cpal::StreamConfig, crate::error::SyncPlayError> {
+pub fn output_config(
+    device: &cpal::Device,
+) -> Result<cpal::StreamConfig, crate::error::SyncPlayError> {
     let supported: Vec<_> = device
         .supported_output_configs()
         .map_err(|e| crate::error::SyncPlayError::Audio(format!("Cannot get output configs: {e}")))?
         .collect();
 
     for cfg in &supported {
-        if cfg.channels() == CHANNELS && cfg.min_sample_rate() <= cpal::SampleRate(SAMPLE_RATE)
+        if cfg.channels() == CHANNELS
+            && cfg.min_sample_rate() <= cpal::SampleRate(SAMPLE_RATE)
             && cfg.max_sample_rate() >= cpal::SampleRate(SAMPLE_RATE)
         {
             return Ok(cpal::StreamConfig {

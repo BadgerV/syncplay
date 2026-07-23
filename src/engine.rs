@@ -22,11 +22,12 @@ use crate::audio::device;
 use crate::audio::playback::start_playback;
 use crate::net::discovery::DiscoveryService;
 use crate::net::receiver::ReceiverSession;
-use crate::net::sender::SenderSession;
+use crate::net::sender::{SenderMonitor, SenderSession};
 use crate::state::shared::{
-    DiscoveredSender, JitterBuffer, ReceiverThreads, SenderThreads, SharedApp, SharedRatio,
-    AUDIO_PORT, CHANNELS, SAMPLE_RATE,
+    DiscoveredSender, JitterBuffer, PlayoutGate, ReceiverThreads, SenderThreads, SharedApp,
+    SharedRatio, AUDIO_PORT, CHANNELS, SAMPLE_RATE,
 };
+use crate::sync::clock::ClockSync;
 use crate::sync::controller::run_sync_controller;
 
 /// Where the sender pulls audio from.
@@ -39,12 +40,19 @@ pub enum AudioSource {
 }
 
 /// Start the sender pipeline. Returns thread handles the UI stores in state.
-pub fn start_sender(shared: SharedApp, source: AudioSource) -> SenderThreads {
+///
+/// `playout_delay_ms` is the synchronized-playout budget: the source plays its
+/// own audio this many ms after capture, matching every remote receiver.
+pub fn start_sender(
+    shared: SharedApp,
+    source: AudioSource,
+    playout_delay_ms: u64,
+) -> SenderThreads {
     let stop = Arc::new(AtomicBool::new(false));
     let stop_thread = stop.clone();
     let handle = std::thread::Builder::new()
         .name("syncplay-sender".into())
-        .spawn(move || sender_engine(shared, source, stop_thread))
+        .spawn(move || sender_engine(shared, source, playout_delay_ms, stop_thread))
         .expect("failed to spawn sender engine thread");
 
     SenderThreads {
@@ -53,7 +61,12 @@ pub fn start_sender(shared: SharedApp, source: AudioSource) -> SenderThreads {
     }
 }
 
-fn sender_engine(shared: SharedApp, source: AudioSource, stop: Arc<AtomicBool>) {
+fn sender_engine(
+    shared: SharedApp,
+    source: AudioSource,
+    playout_delay_ms: u64,
+    stop: Arc<AtomicBool>,
+) {
     let session = match SenderSession::new() {
         Ok(s) => s,
         Err(e) => return fail_sender(&shared, &format!("cannot bind sender ports: {e}")),
@@ -102,14 +115,29 @@ fn sender_engine(shared: SharedApp, source: AudioSource, stop: Arc<AtomicBool>) 
     let discovery = DiscoveryService::new().ok();
     if let Some(d) = &discovery {
         let host = local_ip_address().unwrap_or_else(|| "127.0.0.1".to_string());
-        if let Err(e) = d.register_sender("SyncPlay Sender", &host, AUDIO_PORT, SAMPLE_RATE, CHANNELS)
+        if let Err(e) =
+            d.register_sender("SyncPlay Sender", &host, AUDIO_PORT, SAMPLE_RATE, CHANNELS)
         {
             tracing::warn!("mDNS registration failed: {e}");
         }
     }
 
-    // Blocks until `stop` is set; the source above stays alive in scope.
-    session.run(rx, shared.clone(), stop.clone());
+    // ── Local delayed monitor: play the source's own audio at capture+budget so
+    //    it comes out in sync with every remote receiver. Kept in scope for the
+    //    whole session; failure to open output degrades gracefully to net-only.
+    let budget_us = playout_delay_ms * 1000;
+    let mut _monitor_stream: Option<cpal::Stream> = None;
+    let mut _monitor_sync: Option<std::thread::JoinHandle<()>> = None;
+    let monitor = build_sender_monitor(
+        budget_us,
+        stop.clone(),
+        shared.clone(),
+        &mut _monitor_stream,
+        &mut _monitor_sync,
+    );
+
+    // Blocks until `stop` is set; the source + monitor stay alive in scope.
+    session.run(rx, shared.clone(), stop.clone(), monitor);
 
     if let Some(d) = &discovery {
         d.unregister();
@@ -166,32 +194,110 @@ fn fail_sender(shared: &SharedApp, msg: &str) {
     shared.lock().sender.is_streaming = false;
 }
 
+/// Build the source's local delayed-playback monitor: an output stream + drift
+/// controller that play the sender's own audio at `capture + budget`, so the
+/// source is in sync with remote receivers. Returns `None` (net-only) if no
+/// output device is available. On success, `stream_slot`/`sync_slot` are filled
+/// and must be kept alive for the session.
+fn build_sender_monitor(
+    budget_us: u64,
+    stop: Arc<AtomicBool>,
+    shared: SharedApp,
+    stream_slot: &mut Option<cpal::Stream>,
+    sync_slot: &mut Option<std::thread::JoinHandle<()>>,
+) -> Option<SenderMonitor> {
+    let device = device::default_output_device()?;
+    let config = match device::output_config(&device) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!("Source monitor disabled (output config error: {e})");
+            return None;
+        }
+    };
+
+    let jitter = Arc::new(JitterBuffer::new(SAMPLE_RATE as usize));
+    let ratio = Arc::new(SharedRatio::new(1.0));
+    let volume = Arc::new(AtomicU32::new(1.0f32.to_bits()));
+    let gate = Arc::new(PlayoutGate::new());
+
+    match start_playback(
+        &device,
+        &config,
+        jitter.clone(),
+        ratio.clone(),
+        volume.clone(),
+        gate.clone(),
+        stop.clone(),
+    ) {
+        Ok(s) => *stream_slot = Some(s),
+        Err(e) => {
+            tracing::warn!("Source monitor disabled (playback error: {e})");
+            return None;
+        }
+    }
+
+    // The source's capture device (e.g. BlackHole) and its speakers run on
+    // independent clocks, so the monitor still needs drift control. It does not
+    // own the UI, so `mirror_to_ui = false`.
+    let sync = {
+        let (jitter, ratio, shared, volume, gate, stop) = (
+            jitter.clone(),
+            ratio.clone(),
+            shared,
+            volume.clone(),
+            gate.clone(),
+            stop,
+        );
+        std::thread::Builder::new()
+            .name("syncplay-monitor-sync".into())
+            .spawn(move || run_sync_controller(jitter, ratio, shared, volume, gate, stop, false))
+            .expect("failed to spawn monitor sync thread")
+    };
+    *sync_slot = Some(sync);
+
+    tracing::info!(
+        "Source monitor: playing local audio delayed {}ms to match receivers",
+        budget_us / 1000
+    );
+    Some(SenderMonitor {
+        jitter,
+        gate,
+        budget_us,
+    })
+}
+
 /// Start the receiver pipeline for a chosen sender. Returns thread handles.
 pub fn start_receiver(
     shared: SharedApp,
     sender: DiscoveredSender,
     output_name: String,
+    playout_delay_ms: u64,
 ) -> ReceiverThreads {
     let stop = Arc::new(AtomicBool::new(false));
 
     // Shared audio-path state, created here so both threads reference the same
-    // buffers.
+    // buffers. `gate` holds playback silent until the synchronized start
+    // instant; `clock` estimates the sender↔receiver clock offset.
     let jitter = Arc::new(JitterBuffer::new(SAMPLE_RATE as usize)); // ~1s capacity
     let ratio = Arc::new(SharedRatio::new(1.0));
     let volume = Arc::new(AtomicU32::new(1.0f32.to_bits()));
+    let gate = Arc::new(PlayoutGate::new());
+    let clock = Arc::new(ClockSync::new());
+    let budget_us = playout_delay_ms * 1000;
 
     // Sync controller thread: adjusts `ratio` and mirrors the volume slider.
     let sync_handle = {
-        let (jitter, ratio, shared, volume, stop) = (
+        let (jitter, ratio, shared, volume, gate, stop) = (
             jitter.clone(),
             ratio.clone(),
             shared.clone(),
             volume.clone(),
+            gate.clone(),
             stop.clone(),
         );
         std::thread::Builder::new()
             .name("syncplay-sync".into())
-            .spawn(move || run_sync_controller(jitter, ratio, shared, volume, stop))
+            .spawn(move || run_sync_controller(jitter, ratio, shared, volume, gate, stop, true))
             .expect("failed to spawn sync controller thread")
     };
 
@@ -201,7 +307,18 @@ pub fn start_receiver(
         std::thread::Builder::new()
             .name("syncplay-receiver".into())
             .spawn(move || {
-                receiver_engine(shared, sender, output_name, jitter, ratio, volume, stop)
+                receiver_engine(
+                    shared,
+                    sender,
+                    output_name,
+                    jitter,
+                    ratio,
+                    volume,
+                    gate,
+                    clock,
+                    budget_us,
+                    stop,
+                )
             })
             .expect("failed to spawn receiver engine thread")
     };
@@ -221,6 +338,9 @@ fn receiver_engine(
     jitter: Arc<JitterBuffer>,
     ratio: Arc<SharedRatio>,
     volume: Arc<AtomicU32>,
+    gate: Arc<PlayoutGate>,
+    clock: Arc<ClockSync>,
+    budget_us: u64,
     stop: Arc<AtomicBool>,
 ) {
     let device = if output_name.is_empty() {
@@ -250,6 +370,7 @@ fn receiver_engine(
         jitter.clone(),
         ratio.clone(),
         volume.clone(),
+        gate.clone(),
         stop.clone(),
     ) {
         Ok(s) => s,
@@ -262,7 +383,14 @@ fn receiver_engine(
     );
 
     // Blocks until `stop` is set; `_stream` stays alive in scope meanwhile.
-    session.run(&jitter, shared.clone(), stop.clone());
+    session.run(
+        &jitter,
+        shared.clone(),
+        stop.clone(),
+        clock,
+        gate,
+        budget_us,
+    );
 
     session.disconnect();
     shared.lock().receiver.is_connected = false;

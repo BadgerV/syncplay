@@ -58,6 +58,12 @@ struct Args {
     /// Headless: stop automatically after this many seconds
     #[arg(long)]
     duration: Option<u64>,
+
+    /// Synchronized-playout budget in ms: the fixed delay, from capture, at
+    /// which every endpoint (source included) plays. Higher = more robust to
+    /// network jitter but more latency. Must exceed network + device latency.
+    #[arg(long, default_value_t = crate::state::shared::DEFAULT_PLAYOUT_DELAY_MS)]
+    playout_delay_ms: u64,
 }
 
 fn main() -> Result<()> {
@@ -84,12 +90,18 @@ fn main() -> Result<()> {
     // Pre-populate device lists and apply CLI device selections.
     {
         let mut app = app_state.lock();
-        app.sender.available_input_devices =
-            device::enumerate_input_devices().into_iter().map(|d| d.name).collect();
-        app.sender.available_output_devices =
-            device::enumerate_output_devices().into_iter().map(|d| d.name).collect();
-        app.receiver.available_output_devices =
-            device::enumerate_output_devices().into_iter().map(|d| d.name).collect();
+        app.sender.available_input_devices = device::enumerate_input_devices()
+            .into_iter()
+            .map(|d| d.name)
+            .collect();
+        app.sender.available_output_devices = device::enumerate_output_devices()
+            .into_iter()
+            .map(|d| d.name)
+            .collect();
+        app.receiver.available_output_devices = device::enumerate_output_devices()
+            .into_iter()
+            .map(|d| d.name)
+            .collect();
 
         if let Some(ref name) = args.input_device {
             app.sender.selected_input_device = name.clone();
@@ -122,12 +134,18 @@ fn main() -> Result<()> {
                 } else {
                     engine::AudioSource::Device(args.input_device.clone().unwrap_or_default())
                 };
-                headless::run_sender(app_state.clone(), source, args.duration)
+                headless::run_sender(
+                    app_state.clone(),
+                    source,
+                    args.playout_delay_ms,
+                    args.duration,
+                )
             }
             AppMode::Receiver => headless::run_receiver(
                 app_state.clone(),
                 args.connect.clone(),
                 args.sender_ip.clone(),
+                args.playout_delay_ms,
                 args.duration,
             ),
         };

@@ -16,9 +16,14 @@ const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Run the sender pipeline without a GUI, logging stats every second until
 /// `duration_secs` elapses (or until killed, if `None`).
-pub fn run_sender(shared: SharedApp, source: AudioSource, duration_secs: Option<u64>) -> Result<()> {
+pub fn run_sender(
+    shared: SharedApp,
+    source: AudioSource,
+    playout_delay_ms: u64,
+    duration_secs: Option<u64>,
+) -> Result<()> {
     shared.lock().sender.is_streaming = true;
-    let threads = start_sender(shared.clone(), source);
+    let threads = start_sender(shared.clone(), source, playout_delay_ms);
     tracing::info!("Headless sender running (Ctrl-C to stop).");
 
     let deadline = duration_secs.map(|s| Instant::now() + Duration::from_secs(s));
@@ -51,6 +56,7 @@ pub fn run_receiver(
     shared: SharedApp,
     connect_filter: Option<String>,
     manual_ip: Option<String>,
+    playout_delay_ms: u64,
     duration_secs: Option<u64>,
 ) -> Result<()> {
     // A manual IP skips mDNS entirely — useful when the network blocks
@@ -77,7 +83,7 @@ pub fn run_receiver(
         sender.port
     );
     let output = shared.lock().receiver.selected_output_device.clone();
-    let threads = start_receiver(shared.clone(), sender.clone(), output);
+    let threads = start_receiver(shared.clone(), sender.clone(), output, playout_delay_ms);
     {
         let mut app = shared.lock();
         app.receiver.is_connected = true;
