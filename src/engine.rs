@@ -37,6 +37,9 @@ pub enum AudioSource {
     /// Synthesize a sine test tone at the given frequency (Hz). Lets us verify
     /// end-to-end streaming without a loopback device like BlackHole.
     Tone(f32),
+    /// Capture the whole system audio mix via ScreenCaptureKit — the
+    /// Airfoil-style "stream what's playing" source, no BlackHole needed.
+    System,
 }
 
 /// Start the sender pipeline. Returns thread handles the UI stores in state.
@@ -85,14 +88,26 @@ fn sender_engine(
     let (tx, rx) = bounded::<Vec<i16>>(64);
 
     // Own the audio source for the whole session. Exactly one of these is set;
-    // both bindings stay in scope so the stream/thread lives until we return.
+    // the binding stays in scope so the stream/thread lives until we return.
     let mut _capture: Option<cpal::Stream> = None;
     let mut _tone: Option<std::thread::JoinHandle<()>> = None;
+    let mut _system: Option<screencapturekit::prelude::SCStream> = None;
 
     match source {
         AudioSource::Tone(freq) => {
             tracing::info!("Sender source: {freq:.0} Hz test tone");
             _tone = Some(spawn_tone(freq as f64, 0.15, tx, stop.clone()));
+        }
+        AudioSource::System => {
+            match crate::audio::systemcapture::start_system_capture(tx, stop.clone()) {
+                Ok(s) => {
+                    tracing::info!("Sender source: system audio (ScreenCaptureKit)");
+                    _system = Some(s);
+                }
+                Err(e) => {
+                    return fail_sender(&shared, &format!("cannot start system capture: {e}"))
+                }
+            }
         }
         AudioSource::Device(input_name) => {
             let device = if input_name.is_empty() {

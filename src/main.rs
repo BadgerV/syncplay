@@ -42,6 +42,11 @@ struct Args {
     #[arg(long)]
     tone: bool,
 
+    /// Sender: capture the whole system audio mix via ScreenCaptureKit
+    /// (no BlackHole needed). Requires Screen Recording permission.
+    #[arg(long)]
+    capture_system: bool,
+
     /// Sender: test-tone frequency in Hz
     #[arg(long, default_value_t = 440.0)]
     tone_freq: f32,
@@ -131,6 +136,8 @@ fn main() -> Result<()> {
             AppMode::Sender => {
                 let source = if args.tone {
                     engine::AudioSource::Tone(args.tone_freq)
+                } else if args.capture_system {
+                    engine::AudioSource::System
                 } else {
                     engine::AudioSource::Device(args.input_device.clone().unwrap_or_default())
                 };
