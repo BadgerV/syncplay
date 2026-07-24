@@ -87,6 +87,13 @@ fn sender_engine(
 
     let (tx, rx) = bounded::<Vec<i16>>(64);
 
+    // System capture taps the audio mix but doesn't silence it — the source is
+    // already playing live on this Mac's speakers. A delayed local monitor would
+    // add a second, offset copy (echo), so we skip it for this source. Other
+    // sources (tone, BlackHole/mic) are NOT otherwise audible, so the monitor is
+    // what makes them play locally, in sync with receivers.
+    let is_system = matches!(source, AudioSource::System);
+
     // Own the audio source for the whole session. Exactly one of these is set;
     // the binding stays in scope so the stream/thread lives until we return.
     let mut _capture: Option<cpal::Stream> = None;
@@ -153,14 +160,19 @@ fn sender_engine(
     let budget_us = playout_delay_ms * 1000;
     let mut _monitor_stream: Option<cpal::Stream> = None;
     let mut _monitor_sync: Option<std::thread::JoinHandle<()>> = None;
-    let monitor = build_sender_monitor(
-        budget_us,
-        monitor_output,
-        stop.clone(),
-        shared.clone(),
-        &mut _monitor_stream,
-        &mut _monitor_sync,
-    );
+    let monitor = if is_system {
+        tracing::info!("Source plays live (system capture) — skipping delayed monitor");
+        None
+    } else {
+        build_sender_monitor(
+            budget_us,
+            monitor_output,
+            stop.clone(),
+            shared.clone(),
+            &mut _monitor_stream,
+            &mut _monitor_sync,
+        )
+    };
 
     // Blocks until `stop` is set; the source + monitor stay alive in scope.
     session.run(rx, shared.clone(), stop.clone(), monitor);
