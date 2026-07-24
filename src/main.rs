@@ -43,9 +43,15 @@ struct Args {
     tone: bool,
 
     /// Sender: capture the whole system audio mix via ScreenCaptureKit
-    /// (no BlackHole needed). Requires Screen Recording permission.
+    /// (no BlackHole needed). Source keeps playing live. Screen Recording perm.
     #[arg(long)]
     capture_system: bool,
+
+    /// Sender: capture via a MUTED Core Audio process tap (macOS 14.4+, no
+    /// BlackHole). Airfoil-style — source is silenced and replayed on delay in
+    /// sync with receivers. Requires Audio Recording permission.
+    #[arg(long)]
+    capture_tap: bool,
 
     /// Sender: test-tone frequency in Hz
     #[arg(long, default_value_t = 440.0)]
@@ -136,6 +142,8 @@ fn main() -> Result<()> {
             AppMode::Sender => {
                 let source = if args.tone {
                     engine::AudioSource::Tone(args.tone_freq)
+                } else if args.capture_tap {
+                    engine::AudioSource::Tap
                 } else if args.capture_system {
                     engine::AudioSource::System
                 } else {

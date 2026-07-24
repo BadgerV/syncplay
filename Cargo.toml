@@ -32,6 +32,13 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 clap = { version = "4", features = ["derive"] }
 screencapturekit = "8"
+# Core Audio process-tap capture (no BlackHole): CATapDescription + mute.
+objc2-core-audio = "0.3"
+block2 = "0.6"
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSArray", "NSString", "NSDictionary", "NSValue"] }
+objc2-core-foundation = { version = "0.3", features = ["CFDictionary", "CFString"] }
+objc2-core-audio-types = { version = "0.3", features = ["CoreAudioBaseTypes", "objc2"] }
 
 [profile.release]
 opt-level = 3

@@ -38,8 +38,12 @@ pub enum AudioSource {
     /// end-to-end streaming without a loopback device like BlackHole.
     Tone(f32),
     /// Capture the whole system audio mix via ScreenCaptureKit — the
-    /// Airfoil-style "stream what's playing" source, no BlackHole needed.
+    /// "stream what's playing" source. Source keeps playing LIVE (not muted).
     System,
+    /// Capture via a muted Core Audio process tap — Airfoil-grade: the source's
+    /// live output is silenced, and the delayed monitor replays it in sync with
+    /// receivers, so every Mac plays together. No BlackHole needed (macOS 14.4+).
+    Tap,
 }
 
 /// Start the sender pipeline. Returns thread handles the UI stores in state.
@@ -99,12 +103,20 @@ fn sender_engine(
     let mut _capture: Option<cpal::Stream> = None;
     let mut _tone: Option<std::thread::JoinHandle<()>> = None;
     let mut _system: Option<screencapturekit::prelude::SCStream> = None;
+    let mut _tap: Option<crate::audio::tapcapture::TapCapture> = None;
 
     match source {
         AudioSource::Tone(freq) => {
             tracing::info!("Sender source: {freq:.0} Hz test tone");
             _tone = Some(spawn_tone(freq as f64, 0.15, tx, stop.clone()));
         }
+        AudioSource::Tap => match crate::audio::tapcapture::start_tap_capture(tx, stop.clone()) {
+            Ok(t) => {
+                tracing::info!("Sender source: muted process tap (Airfoil-style, no BlackHole)");
+                _tap = Some(t);
+            }
+            Err(e) => return fail_sender(&shared, &format!("cannot start process tap: {e}")),
+        },
         AudioSource::System => {
             match crate::audio::systemcapture::start_system_capture(tx, stop.clone()) {
                 Ok(s) => {
