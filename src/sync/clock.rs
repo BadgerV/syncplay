@@ -12,6 +12,10 @@ use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::OnceLock;
 use std::time::Instant;
 
+/// Maximum round-trip time for a clock sample we're willing to anchor playout
+/// on. rtt/2 bounds the offset error, so 40 ms ⇒ ≤20 ms alignment error.
+pub const GOOD_RTT_US: u64 = 40_000;
+
 /// Process-wide epoch. Captured once, lazily, on first use.
 fn epoch() -> Instant {
     static EPOCH: OnceLock<Instant> = OnceLock::new();
@@ -83,6 +87,14 @@ impl ClockSync {
     /// True once at least one sample has been folded in.
     pub fn is_synced(&self) -> bool {
         self.synced.load(Ordering::Relaxed)
+    }
+
+    /// True once we have a *trustworthy* offset: a sample whose round-trip is
+    /// low enough that the offset error (≈ rtt/2) is acceptable for anchoring.
+    /// Anchoring off a high-RTT sample puts the playout deadline in the wrong
+    /// place, so we wait for this before committing the start instant.
+    pub fn is_good(&self) -> bool {
+        self.synced.load(Ordering::Relaxed) && self.best_rtt_us() <= GOOD_RTT_US
     }
 
     /// Convert a remote (sender-clock) timestamp into local (receiver) time.

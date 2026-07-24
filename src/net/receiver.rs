@@ -72,15 +72,18 @@ impl ReceiverSession {
     /// time probes so we converge on a clean, low-RTT offset estimate. Runs for
     /// up to `WARMUP` or until we have several good samples.
     fn warmup_clock(&self, clock: &Arc<ClockSync>, stop: &Arc<AtomicBool>) {
-        const WARMUP: Duration = Duration::from_millis(700);
+        // Keep probing until we land a trustworthy (low-RTT) sample, or give up
+        // after MAX. A fixed short window can come up empty on a lossy network,
+        // which would force anchoring off a bad sample — so we persist.
+        const MAX: Duration = Duration::from_millis(4000);
         const PROBE_EVERY: Duration = Duration::from_millis(40);
         let mut buf = vec![0u8; MAX_PACKET_SIZE];
         let start = Instant::now();
         let mut last = Instant::now() - PROBE_EVERY;
 
-        while start.elapsed() < WARMUP {
-            if stop.load(Ordering::Relaxed) {
-                return;
+        while start.elapsed() < MAX {
+            if stop.load(Ordering::Relaxed) || clock.is_good() {
+                break;
             }
             if last.elapsed() >= PROBE_EVERY {
                 self.send_time_probe();
@@ -99,11 +102,18 @@ impl ReceiverSession {
             }
         }
 
-        tracing::info!(
-            "Clock warmup complete: offset={}us best_rtt={}us",
-            clock.offset_us(),
-            clock.best_rtt_us(),
-        );
+        if clock.is_good() {
+            tracing::info!(
+                "Clock warmup complete: offset={}us best_rtt={}us",
+                clock.offset_us(),
+                clock.best_rtt_us(),
+            );
+        } else {
+            tracing::warn!(
+                "Clock warmup weak: best_rtt={}us (network jitter) — sync may be loose",
+                clock.best_rtt_us(),
+            );
+        }
     }
 
     /// Send an unsubscribe message to the sender.
@@ -143,6 +153,10 @@ impl ReceiverSession {
         let mut recv_buf = vec![0u8; MAX_PACKET_SIZE];
         let mut peak: f32 = 0.0;
         let mut last_ping = Instant::now() - TIMESYNC_INTERVAL; // ping immediately
+        let mut first_audio_at: Option<Instant> = None;
+        // If we can't get a trustworthy clock sample this long after audio
+        // starts, anchor anyway with the best we have rather than stay silent.
+        const ANCHOR_FALLBACK: Duration = Duration::from_millis(2500);
 
         loop {
             if stop.load(Ordering::Relaxed) {
@@ -185,9 +199,18 @@ impl ReceiverSession {
                                 continue;
                             }
 
-                            // Anchor playout on the first audio chunk after the
-                            // clock is synced: schedule the shared start instant.
-                            if !gate.is_armed() && clock.is_synced() {
+                            let now_first = *first_audio_at.get_or_insert_with(Instant::now);
+
+                            // Anchor playout once we have a TRUSTWORTHY clock
+                            // sample. Until then the gate holds silence (buffer
+                            // primes for free), so waiting costs nothing and
+                            // avoids committing the start to a bad offset. If the
+                            // network never yields a good sample, fall back after
+                            // ANCHOR_FALLBACK so we still play (loosely synced).
+                            let good = clock.is_good();
+                            let fallback =
+                                clock.is_synced() && now_first.elapsed() >= ANCHOR_FALLBACK;
+                            if !gate.is_armed() && (good || fallback) {
                                 let local = clock.remote_to_local_us(packet.timestamp_micros);
                                 let deadline = (local + budget_us as i64).max(0) as u64;
                                 gate.arm(deadline);

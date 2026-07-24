@@ -235,7 +235,8 @@ fn build_sender_monitor(
         }
     };
 
-    let jitter = Arc::new(JitterBuffer::new(SAMPLE_RATE as usize));
+    let max_samples = jitter_cap_samples(budget_us / 1000);
+    let jitter = Arc::new(JitterBuffer::with_max(SAMPLE_RATE as usize, max_samples));
     let ratio = Arc::new(SharedRatio::new(1.0));
     let volume = Arc::new(AtomicU32::new(1.0f32.to_bits()));
     let gate = Arc::new(PlayoutGate::new());
@@ -298,7 +299,10 @@ pub fn start_receiver(
     // Shared audio-path state, created here so both threads reference the same
     // buffers. `gate` holds playback silent until the synchronized start
     // instant; `clock` estimates the sender↔receiver clock offset.
-    let jitter = Arc::new(JitterBuffer::new(SAMPLE_RATE as usize)); // ~1s capacity
+    // Cap the buffer at budget + 120ms so a network burst can't accumulate
+    // unbounded latency; excess is dropped to snap back to the playout point.
+    let max_samples = jitter_cap_samples(playout_delay_ms);
+    let jitter = Arc::new(JitterBuffer::with_max(SAMPLE_RATE as usize, max_samples));
     let ratio = Arc::new(SharedRatio::new(1.0));
     let volume = Arc::new(AtomicU32::new(1.0f32.to_bits()));
     let gate = Arc::new(PlayoutGate::new());
@@ -420,6 +424,14 @@ fn receiver_engine(
 fn fail_receiver(shared: &SharedApp, msg: &str) {
     tracing::error!("Receiver failed to start: {msg}");
     shared.lock().receiver.is_connected = false;
+}
+
+/// Hard cap for a jitter buffer: `budget + 120ms` of stereo audio, expressed in
+/// interleaved i16 samples. Bounds added latency so a network burst can't push
+/// playback permanently behind the intended playout point.
+fn jitter_cap_samples(budget_ms: u64) -> usize {
+    const STEREO_SAMPLES_PER_MS: u64 = (SAMPLE_RATE as u64 / 1000) * CHANNELS as u64; // 96
+    ((budget_ms + 120) * STEREO_SAMPLES_PER_MS) as usize
 }
 
 /// Discover this machine's local (non-loopback) IPv4 address.

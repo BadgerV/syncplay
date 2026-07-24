@@ -136,22 +136,37 @@ impl SharedRatio {
 /// the consumer (audio callback) pops samples every ~10ms.
 pub struct JitterBuffer {
     inner: Mutex<VecDeque<i16>>,
+    /// Hard cap on buffered samples. When a network burst (bufferbloat) pushes
+    /// the buffer past this, we drop the *oldest* samples to snap playback back
+    /// toward the target playout point rather than accumulating latency. 0 = no
+    /// cap (drift controller alone handles small deviations).
+    max_samples: usize,
     pub total_written: AtomicU64,
     pub total_read: AtomicU64,
     pub last_sequence: AtomicU64,
     pub packets_lost: AtomicU64,
     pub underruns: AtomicU64,
+    /// Count of hard catch-up drops (large buffer excursions snapped back).
+    pub resyncs: AtomicU64,
 }
 
 impl JitterBuffer {
     pub fn new(capacity_frames: usize) -> Self {
+        Self::with_max(capacity_frames, 0)
+    }
+
+    /// Create a jitter buffer that hard-caps its fill at `max_samples`
+    /// (interleaved i16 count; 0 disables the cap).
+    pub fn with_max(capacity_frames: usize, max_samples: usize) -> Self {
         Self {
             inner: Mutex::new(VecDeque::with_capacity(capacity_frames * 2)),
+            max_samples,
             total_written: AtomicU64::new(0),
             total_read: AtomicU64::new(0),
             last_sequence: AtomicU64::new(u64::MAX),
             packets_lost: AtomicU64::new(0),
             underruns: AtomicU64::new(0),
+            resyncs: AtomicU64::new(0),
         }
     }
 
@@ -160,6 +175,15 @@ impl JitterBuffer {
         buf.extend(data.iter());
         self.total_written
             .fetch_add(data.len() as u64, Ordering::Relaxed);
+
+        // Bound latency: if a burst overfilled us, drop the oldest samples so
+        // playback catches up to the correct playout point (one small skip
+        // instead of permanent added delay).
+        if self.max_samples > 0 && buf.len() > self.max_samples {
+            let drop = buf.len() - self.max_samples;
+            buf.drain(0..drop);
+            self.resyncs.fetch_add(1, Ordering::Relaxed);
+        }
     }
 
     pub fn pop_samples(&self, out: &mut [i16]) -> usize {
